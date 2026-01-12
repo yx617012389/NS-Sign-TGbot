@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "cloudscraper": "^4.6.0",
+    "dayjs": "^1.11.19",
+    "dotenv": "^17.2.3",
+    "node-cron": "^4.2.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
