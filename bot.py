@@ -1,4 +1,4 @@
-# bot_dual.py - 支持双网站的签到机器人
+# bot_dual.py - 支持多网站的签到机器人
 import os
 import json
 import logging
@@ -19,6 +19,7 @@ from telegram.ext import (
     ContextTypes, CallbackContext
 )
 from nodeseek_login_dual import login_and_get_cookie
+from xserver_renew import login_xserver, renew_xserver
 
 # ========== 配置 ==========
 load_dotenv()
@@ -38,6 +39,11 @@ SITES = {
         "name": "DeepFlood", 
         "domain": "www.deepflood.com",
         "emoji": "🟢"
+    },
+    "xs": {
+        "name": "XServer",
+        "domain": "www.xserver.ne.jp",
+        "emoji": "🟣"
     }
 }
 
@@ -52,18 +58,22 @@ def ensure_user_structure(data, uid):
     u = data["users"][uid]
 
     if "accounts" not in u:
-        u["accounts"] = {"ns": {}, "df": {}}  # 分网站存储账号
+        u["accounts"] = {"ns": {}, "df": {}, "xs": {}}  # 分网站存储账号
     else:
         # 兼容旧数据结构，迁移到新结构
         if not isinstance(u["accounts"], dict) or "ns" not in u["accounts"]:
             old_accounts = u["accounts"] if isinstance(u["accounts"], dict) else {}
-            u["accounts"] = {"ns": old_accounts, "df": {}}
+            u["accounts"] = {"ns": old_accounts, "df": {}, "xs": {}}
+        else:
+            u["accounts"].setdefault("xs", {})
     
     if "mode" not in u:
-        u["mode"] = {"ns": False, "df": False}  # 分网站模式
+        u["mode"] = {"ns": False, "df": False, "xs": False}  # 分网站模式
     elif not isinstance(u["mode"], dict):
         old_mode = u["mode"]
-        u["mode"] = {"ns": old_mode, "df": False}
+        u["mode"] = {"ns": old_mode, "df": False, "xs": False}
+    else:
+        u["mode"].setdefault("xs", False)
         
     if "tgUsername" not in u:
         u["tgUsername"] = ""
@@ -122,7 +132,9 @@ def mask_username(name: str) -> str:
         return name[0] + "***" + (name[1] if len(name) > 1 else "")
     return name[0] + "***" + name[-1]
 
-def mode_text(mode: bool) -> str:
+def mode_text(mode: bool, site_type: str = "") -> str:
+    if site_type == "xs":
+        return "续期"
     return "随机模式" if mode else "固定模式"
 
 def get_site_info(site_type: str) -> dict:
@@ -131,7 +143,7 @@ def get_site_info(site_type: str) -> dict:
 def has_any_accounts(user_data: dict) -> bool:
     """检查用户是否有任何账号"""
     accounts = user_data.get("accounts", {})
-    return bool(accounts.get("ns", {}) or accounts.get("df", {}))
+    return bool(accounts.get("ns", {}) or accounts.get("df", {}) or accounts.get("xs", {}))
 
 async def notify_admins(app, message: str):
     for admin_id in ADMIN_IDS:
@@ -170,7 +182,7 @@ def require_account(func):
         if not has_any_accounts(user_data):
             return await send_and_auto_delete(
                 update.message.chat, 
-                "⚠️ 无效指令，请先添加账号后使用\n格式: /add ns 账号@密码 或 /add df 账号@密码", 
+                "⚠️ 无效指令，请先添加账号后使用\n格式: /add ns 账号@密码 或 /add df 账号@密码 或 /add xs 账号@密码", 
                 5, 
                 user_msg=update.message
             )
@@ -181,7 +193,7 @@ def require_account(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if is_admin(user_id):
-        text = """欢迎使用双网站签到机器人！
+        text = """欢迎使用多网站签到机器人！
 ------- 【菜 单】 --------
 /start - 显示帮助
 /check - 手动签到
@@ -195,21 +207,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /settime - 自动签到时间（范围 0–10 点）
 /txt  - 管理员喊话
 ------- 【说 明】 --------
-🔵 NodeSeek (ns) | 🟢 DeepFlood (df)
+🔵 NodeSeek (ns) | 🟢 DeepFlood (df) | 🟣 XServer (xs)
 默认每天0-0时5分随机时间签到
 
-add 格式: /add ns 账号@密码 或 /add df 账号@密码
-del 格式: /del ns 账号 或 /del df 账号 或 /del TGID
-check 格式: /check 或 /check ns 或 /check df
+add 格式: /add ns 账号@密码 或 /add df 账号@密码 或 /add xs 账号@密码
+del 格式: /del ns 账号 或 /del df 账号 或 /del xs 账号 或 /del TGID
+check 格式: /check 或 /check ns 或 /check df 或 /check xs
 mode 格式: /mode ns true 或 /mode df false
-list 格式: /list 或 /list ns 或 /list df
+list 格式: /list 或 /list ns 或 /list df 或 /list xs
 log 格式: /log ns 7 账号 或 /log df 30
 stats 格式: /stats ns 30 或 /stats df 7
 settime 格式: /settime 7:00
 txt 格式: /txt 内容 或 /txt TGID,内容
 -------------------------"""
     else:
-        text = """欢迎使用双网站签到机器人！
+        text = """欢迎使用多网站签到机器人！
 ------- 【菜 单】 --------
 /start - 显示帮助
 /check - 手动签到
@@ -221,14 +233,14 @@ txt 格式: /txt 内容 或 /txt TGID,内容
 /stats - 签到统计
 /settime - 自动签到时间（范围 0–10 点）
 ------- 【说 明】 --------
-🔵 NodeSeek (ns) | 🟢 DeepFlood (df)
+🔵 NodeSeek (ns) | 🟢 DeepFlood (df) | 🟣 XServer (xs)
 默认每天0-0时5分随机时间签到
 
-add 格式: /add ns 账号@密码 或 /add df 账号@密码
-del 格式: /del ns 账号 或 /del df 账号 或 /del -all
-check 格式: /check 或 /check ns 或 /check df
+add 格式: /add ns 账号@密码 或 /add df 账号@密码 或 /add xs 账号@密码
+del 格式: /del ns 账号 或 /del df 账号 或 /del xs 账号 或 /del -all
+check 格式: /check 或 /check ns 或 /check df 或 /check xs
 mode 格式: /mode ns true 或 /mode df false
-list 格式: /list 或 /list ns 或 /list df
+list 格式: /list 或 /list ns 或 /list df 或 /list xs
 log 格式: /log ns 7 账号 或 /log df 30
 stats 格式: /stats ns 30 或 /stats df 7
 settime 格式: /settime 7:00"""
@@ -251,10 +263,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if len(context.args) < 2 or context.args[0] not in ["ns", "df"] or "@" not in context.args[1]:
+    if len(context.args) < 2 or context.args[0] not in ["ns", "df", "xs"] or "@" not in context.args[1]:
         await send_and_auto_delete(
             update.message.chat, 
-            "用法：/add ns 账号@密码 或 /add df 账号@密码", 
+            "用法：/add ns 账号@密码 或 /add df 账号@密码 或 /add xs 账号@密码", 
             5, 
             user_msg=update.message
         )
@@ -266,7 +278,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await send_and_auto_delete(
             update.message.chat, 
-            "格式错误，应为：/add ns 账号@密码 或 /add df 账号@密码", 
+            "格式错误，应为：/add ns 账号@密码 或 /add df 账号@密码 或 /add xs 账号@密码", 
             3, 
             user_msg=update.message
         )
@@ -282,16 +294,28 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # 调用登录逻辑
-    new_cookie = login_and_get_cookie(account_name, password, site_type)
-    if not new_cookie:
-        await temp_msg.delete()
-        await send_and_auto_delete(
-            update.message.chat, 
-            f"❌ {site_info['name']} 登录失败，请检查账号密码", 
-            3, 
-            user_msg=update.message
-        )
-        return
+    if site_type == "xs":
+        success, message, new_cookie = login_xserver(account_name, password)
+        if not success:
+            await temp_msg.delete()
+            await send_and_auto_delete(
+                update.message.chat, 
+                f"❌ {site_info['name']} 登录失败：{message}", 
+                6, 
+                user_msg=update.message
+            )
+            return
+    else:
+        new_cookie = login_and_get_cookie(account_name, password, site_type)
+        if not new_cookie:
+            await temp_msg.delete()
+            await send_and_auto_delete(
+                update.message.chat, 
+                f"❌ {site_info['name']} 登录失败，请检查账号密码", 
+                3, 
+                user_msg=update.message
+            )
+            return
 
     # 读取 JSON 数据
     data = load_data()
@@ -346,7 +370,7 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await send_and_auto_delete(
             update.message.chat, 
-            "⚠️ 格式错误: /del ns 账号 | /del df 账号 | /del -all | /del TGID", 
+            "⚠️ 格式错误: /del ns 账号 | /del df 账号 | /del xs 账号 | /del -all | /del TGID", 
             5, 
             user_msg=update.message
         )
@@ -384,10 +408,10 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif len(context.args) == 2:
             site_type, account_name = context.args
-            if site_type not in ["ns", "df"]:
+            if site_type not in ["ns", "df", "xs"]:
                 return await send_and_auto_delete(
                     update.message.chat, 
-                    "⚠️ 网站类型错误，应为 ns 或 df", 
+                    "⚠️ 网站类型错误，应为 ns 或 df 或 xs", 
                     3, 
                     user_msg=update.message
                 )
@@ -442,7 +466,7 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.args[0] == "-all":
             # 删除所有账号
             deleted_accounts = []
-            for site_type in ["ns", "df"]:
+            for site_type in ["ns", "df", "xs"]:
                 accounts = user_data.get("accounts", {}).get(site_type, {})
                 for acc_name in accounts:
                     site_info = get_site_info(site_type)
@@ -469,10 +493,10 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif len(context.args) == 2:
             site_type, account_name = context.args
-            if site_type not in ["ns", "df"]:
+            if site_type not in ["ns", "df", "xs"]:
                 return await send_and_auto_delete(
                     update.message.chat, 
-                    "⚠️ 网站类型错误，应为 ns 或 df", 
+                    "⚠️ 网站类型错误，应为 ns 或 df 或 xs", 
                     3, 
                     user_msg=update.message
                 )
@@ -513,10 +537,10 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
-    if len(context.args) != 2 or context.args[0] not in ["ns", "df"] or context.args[1] not in ["true", "false"]:
+    if len(context.args) != 2 or context.args[0] not in ["ns", "df", "xs"] or context.args[1] not in ["true", "false"]:
         return await send_and_auto_delete(
             update.message.chat, 
-            "⚠️ 参数错误，应为 /mode ns true 或 /mode df false", 
+            "⚠️ 参数错误，应为 /mode ns true 或 /mode df false 或 /mode xs false", 
             5, 
             user_msg=update.message
         )
@@ -532,7 +556,7 @@ async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     site_info = get_site_info(site_type)
     await send_and_auto_delete(
         update.message.chat, 
-        f"✅ {site_info['emoji']} {site_info['name']} 签到模式: {mode_text(mode_value)}", 
+        f"✅ {site_info['emoji']} {site_info['name']} 签到模式: {mode_text(mode_value, site_type)}", 
         5, 
         user_msg=update.message
     )
@@ -544,7 +568,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 解析参数
     site_filter = None
-    if context.args and context.args[0] in ["ns", "df"]:
+    if context.args and context.args[0] in ["ns", "df", "xs"]:
         site_filter = context.args[0]
 
     if is_admin(user_id):
@@ -552,7 +576,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "📋 所有用户账号:\n"
         for uid, u in data.get("users", {}).items():
             accounts_info = []
-            for site_type in ["ns", "df"]:
+            for site_type in ["ns", "df", "xs"]:
                 if site_filter and site_filter != site_type:
                     continue
                     
@@ -562,7 +586,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     mode = u.get("mode", {}).get(site_type, False)
                     accounts_list = list(site_accounts.keys())
                     accounts_info.append(
-                        f"{site_info['emoji']} {site_info['name']}【{mode_text(mode)}】: {', '.join(accounts_list)}"
+                        f"{site_info['emoji']} {site_info['name']}【{mode_text(mode, site_type)}】: {', '.join(accounts_list)}"
                     )
             
             if accounts_info:
@@ -587,7 +611,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         text = "📋 你的账号:\n"
-        for site_type in ["ns", "df"]:
+        for site_type in ["ns", "df", "xs"]:
             if site_filter and site_filter != site_type:
                 continue
                 
@@ -596,7 +620,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 site_info = get_site_info(site_type)
                 mode = user_data.get("mode", {}).get(site_type, False)
                 accounts_list = list(site_accounts.keys())
-                text += f"\n{site_info['emoji']} {site_info['name']}【{mode_text(mode)}】:\n"
+                text += f"\n{site_info['emoji']} {site_info['name']}【{mode_text(mode, site_type)}】:\n"
                 text += "\n".join(accounts_list) + "\n"
         
         await send_and_auto_delete(
@@ -684,33 +708,38 @@ async def retry_sign_if_invalid(uid, acc_name, site_type, res, data, mode):
 async def run_sign_and_fix(targets, user_modes, data):
     """执行签到并处理 Cookie 刷新"""
     results = {}
+    js_targets = {}
+    xs_targets = {}
 
     # 转换为 sign_dual.js 需要的格式
-    targets_for_js = {}
     for uid, sites in targets.items():
-        targets_for_js[uid] = {}
+        js_targets[uid] = {}
         for site_type, accounts in sites.items():
-            targets_for_js[uid][site_type] = {
+            if site_type == "xs":
+                xs_targets.setdefault(uid, {})[site_type] = accounts
+                continue
+            js_targets[uid][site_type] = {
                 name: acc["cookie"] for name, acc in accounts.items()
             }
 
-    payload = {"targets": targets_for_js, "userModes": user_modes}
+    payload = {"targets": js_targets, "userModes": user_modes}
 
-    try:
-        proc = subprocess.run(
-            ["node", "sign_dual.js", json.dumps(payload, ensure_ascii=False)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if proc.returncode != 0:
-            logging.error("sign_dual.js 执行失败: %s", proc.stderr.strip())
+    if any(js_targets[uid] for uid in js_targets):
+        try:
+            proc = subprocess.run(
+                ["node", "sign_dual.js", json.dumps(payload, ensure_ascii=False)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if proc.returncode != 0:
+                logging.error("sign_dual.js 执行失败: %s", proc.stderr.strip())
+                return {}
+
+            results = json.loads(proc.stdout)
+        except Exception as e:
+            logging.error("调用 sign_dual.js 异常: %s", e)
             return {}
-
-        results = json.loads(proc.stdout)
-    except Exception as e:
-        logging.error("调用 sign_dual.js 异常: %s", e)
-        return {}
 
     # 处理失败重试
     for uid, sites in results.items():
@@ -723,6 +752,19 @@ async def run_sign_and_fix(targets, user_modes, data):
                 fixed_logs.append(fixed_res)
             results[uid][site_type] = fixed_logs
 
+    if xs_targets:
+        for uid, sites in xs_targets.items():
+            xs_accounts = sites.get("xs", {})
+            if not xs_accounts:
+                continue
+            results.setdefault(uid, {}).setdefault("xs", [])
+            for acc_name, acc in xs_accounts.items():
+                res = await asyncio.to_thread(renew_xserver, acc_name, acc.get("password", ""))
+                if res.get("cookie"):
+                    acc["cookie"] = res["cookie"]
+                    save_data(data)
+                results[uid]["xs"].append(res)
+
     return results
 
 # ========== /check ==========
@@ -732,7 +774,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 解析参数
     site_filter = None
-    if context.args and context.args[0] in ["ns", "df"]:
+    if context.args and context.args[0] in ["ns", "df", "xs"]:
         site_filter = context.args[0]
 
     targets, user_modes = {}, {}
@@ -743,7 +785,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_targets = {}
             user_site_modes = {}
             
-            for site_type in ["ns", "df"]:
+            for site_type in ["ns", "df", "xs"]:
                 if site_filter and site_filter != site_type:
                     continue
                     
@@ -769,7 +811,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_targets = {}
         user_site_modes = {}
         
-        for site_type in ["ns", "df"]:
+        for site_type in ["ns", "df", "xs"]:
             if site_filter and site_filter != site_type:
                 continue
                 
@@ -827,7 +869,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for site_type, logs in sites.items():
             site_info = get_site_info(site_type)
             mode = user_modes.get(user_id, {}).get(site_type, False)
-            text += f"\n{site_info['emoji']} {site_info['name']}【{mode_text(mode)}】:\n"
+            text += f"\n{site_info['emoji']} {site_info['name']}【{mode_text(mode, site_type)}】:\n"
             
             for r in logs:
                 line = f"{mask_username(r['name'])} - {r['result']}"
@@ -863,6 +905,13 @@ async def log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_acc = None
 
     if context.args:
+        if context.args[0] == "xs":
+            return await send_and_auto_delete(
+                update.message.chat,
+                "⚠️ XServer 续期暂不支持查询签到明细",
+                5,
+                user_msg=update.message
+            )
         if context.args[0] in ["ns", "df"]:
             site_type = context.args[0]
             if len(context.args) > 1:
@@ -972,6 +1021,13 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = 30
 
     if context.args:
+        if context.args[0] == "xs":
+            return await send_and_auto_delete(
+                update.message.chat,
+                "⚠️ XServer 续期暂不支持查询签到统计",
+                5,
+                user_msg=update.message
+            )
         if context.args[0] in ["ns", "df"]:
             site_type = context.args[0]
             if len(context.args) > 1 and context.args[1].isdigit():
@@ -1145,7 +1201,7 @@ async def user_daily_check(app: Application, uid: str):
     targets = {uid: {}}
     user_modes = {uid: {}}
     
-    for site_type in ["ns", "df"]:
+    for site_type in ["ns", "df", "xs"]:
         accounts = u.get("accounts", {}).get(site_type, {})
         if accounts:
             targets[uid][site_type] = accounts
@@ -1173,7 +1229,7 @@ async def user_daily_check(app: Application, uid: str):
     for site_type, logs in results.get(uid, {}).items():
         site_info = get_site_info(site_type)
         mode = user_modes[uid].get(site_type, False)
-        text += f"\n{site_info['emoji']} {site_info['name']}【{mode_text(mode)}】:\n"
+        text += f"\n{site_info['emoji']} {site_info['name']}【{mode_text(mode, site_type)}】:\n"
         
         for r in logs:
             line = f"{mask_username(r['name'])} - {r['result']}"
@@ -1229,7 +1285,7 @@ async def get_admin_check_page_content(results, user_modes, data, page: int = 0)
             for site_type, logs in sites.items():
                 site_info = get_site_info(site_type)
                 mode = user_modes.get(uid, {}).get(site_type, False)
-                text += f"{site_info['emoji']} {site_info['name']}【{mode_text(mode)}】:\n"
+                text += f"{site_info['emoji']} {site_info['name']}【{mode_text(mode, site_type)}】:\n"
                 
                 for r in logs:
                     line = f"{mask_username(r['name'])} - {r['result']}"
@@ -1449,7 +1505,7 @@ async def get_hz_page_content(page: int = 0):
             for site_type, records in site_records.items():
                 site_info = get_site_info(site_type)
                 mode = u.get("mode", {}).get(site_type, False)
-                text += f"{site_info['emoji']} {site_info['name']}【{mode_text(mode)}】:\n"
+                text += f"{site_info['emoji']} {site_info['name']}【{mode_text(mode, site_type)}】:\n"
                 
                 for r in records:
                     tag = "[手动]" if r.get("source") == "manual" else "[自动]"
@@ -1807,7 +1863,7 @@ def main():
     # 注册定时任务
     register_jobs(app)
 
-    print("🚀 双网站签到机器人启动成功！")
+    print("🚀 多网站签到机器人启动成功！")
     print(f"🔵 NodeSeek: {SITES['ns']['domain']}")
     print(f"🟢 DeepFlood: {SITES['df']['domain']}")
     
