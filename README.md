@@ -1,4 +1,4 @@
-# NS-Sign-TGbot 部署到 Debian 12（部署流程）
+# NS-Sign-TGbot 部署到 Debian 12（docker部署流程）
 
 > 项目目录：/opt/NodeSeek  
 > 需要准备：TG_BOT_TOKEN、ADMIN_IDS（你的TG用户ID）、CLIENT_KEY（cloudflyer 的 -K）
