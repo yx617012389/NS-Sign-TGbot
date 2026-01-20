@@ -21,7 +21,7 @@ sudo systemctl enable --now docker
 ~~~bash
 sudo mkdir -p /opt/NodeSeek
 cd /opt/NodeSeek
-sudo git clone https://github.com/YizongVM/NS-Sign-TGbot .
+sudo git clone https://github.com/yx617012389/NS-Sign-TGbot .
 ~~~
 
 ---
